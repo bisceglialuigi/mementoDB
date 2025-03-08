@@ -1,41 +1,71 @@
 import time
 import struct
 import os
+import glob
 
 class MementoDb:
+    MAX_FILE_SIZE = 2 * 1024    # 2 KB
+    TOMBSTONE = "__tombstone__"
+
     def __init__(self):
-        self.keydir = {}            #   { key:   (offset, value_size) }
-        self._load_index()          #   reconstruct keydir from existing file
-        print(self.keydir)
+        #   { key:   (segment_file_name, offset, value_size) }
+        self.dictionary = {}
+        self.current_file_path = self._get_latest_log_file()
+        #   reconstruct keydir from existing file
+        self._load_index()
+        print(self.dictionary)
+
+
+    def _get_latest_log_file(self):
+        log_files = sorted(glob.glob("file-*.log"))
+        if log_files:
+            return log_files[-1]
+        return "file-1.log"
+
+    def _rotate_segment_file(self):
+        file_size = 0
+        if os.path.exists(self.current_file_path):
+            file_size = os.path.getsize(self.current_file_path)
+
+        if file_size >= self.MAX_FILE_SIZE:
+            file_number = int(self.current_file_path.split("-")[1].split(".")[0])
+            self.current_file_path = f"file-{file_number + 1}.log"
+
 
     def _load_index(self):
-        if not os.path.exists("file.log"):
+        if not os.path.exists(self.current_file_path):
             return
 
-        with open("file.log", "rb") as log_file:
-            offset = 0
-            while True:
-                # read the header (first 16 bytes from the current pos, TIMESTAMP (8 bytes) | KEY_SIZE (4 bytes) | VALUE_SIZE (4 bytes))
-                header = log_file.read(16)
+        log_files = sorted(glob.glob("file-*.log"))
 
-                if not header:
-                    break
+        for log_file_path in log_files:
+            with open(log_file_path, "rb") as log_file:
+                offset = 0
+                while True:
+                    # read the header (first 16 bytes from the current pos, TIMESTAMP (8 bytes) | KEY_SIZE (4 bytes) | VALUE_SIZE (4 bytes))
+                    header = log_file.read(16)
 
-                timestamp, key_size, value_size = struct.unpack("QII", header)
+                    if not header:
+                        break
 
-                # retrieve the key
-                key = log_file.read(key_size).decode()
-                # retrieve and discard value
-                log_file.read(value_size)
+                    timestamp, key_size, value_size = struct.unpack("QII", header)
 
-                # insert into keydir
-                self.keydir[key] = (offset, value_size)
+                    # retrieve the key
+                    key = log_file.read(key_size).decode()
+                    # retrieve and discard value
+                    log_file.read(value_size)
 
-                # update the offset for next fetch
-                offset += 16 + key_size + value_size
+                    # insert into keydir
+                    self.dictionary[key] = (log_file_path, offset, value_size)
+
+                    # update the offset for next fetch
+                    offset += 16 + key_size + value_size
 
 
     def put(self, key, value):
+
+        self._rotate_segment_file()
+
         # create HEADER to store in log file as TIMESTAMP | KEY_SIZE | VALUE_SIZE
         timestamp = int(time.time())
         key_bytes = key.encode()
@@ -43,7 +73,7 @@ class MementoDb:
         header = struct.pack("QII", timestamp, len(key_bytes), len(value_bytes))
 
 
-        with open("file.log", "ab") as log_file:
+        with open(self.current_file_path, "ab") as log_file:
             # get offset from file
             offset = log_file.tell()
 
@@ -51,16 +81,17 @@ class MementoDb:
             log_file.write(header + key_bytes + value_bytes)
 
         # update key dictionary with
-        self.keydir[key] = (offset, len(value_bytes))
+        self.dictionary[key] = (self.current_file_path, offset, len(value_bytes))
 
     def get(self, key):
-        if key not in self.keydir:
+        if key not in self.dictionary:
             return None
 
-        offset, value_size = self.keydir[key]
+        # fetch the segment where the data are stored, the offset and the size of the value
+        segment_log_file, offset, value_size = self.dictionary[key]
 
         # open the file
-        with open("file.log", "rb") as log_file:
+        with open(segment_log_file, "rb") as log_file:
             # the reading starts at OFFSET (in bytes) + HEADERS BYTES + KEY BYTES, what remains are the VALUE BYTES
             reading_offset = offset + 16 + len(key)
             # seek from the reading offset
@@ -72,15 +103,15 @@ class MementoDb:
         return value
 
     def delete(self, key):
-        if key in self.keydir:
-            self.put(key, "__tombstone__")
-            del self.keydir[key]
+        if key in self.dictionary:
+            self.put(key, self.TOMBSTONE)
+            del self.dictionary[key]
 
 
 
 memento_db = MementoDb()
 
-memento_db.put("key1", "first value")
+memento_db.put("key1", "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789")
 value = memento_db.get("key1")
 print(value)
 
