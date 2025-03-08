@@ -6,6 +6,7 @@ import glob
 class MementoDb:
     MAX_FILE_SIZE = 2 * 1024    # 2 KB
     TOMBSTONE = "__tombstone__"
+    HEADER_SIZE = 16
 
     def __init__(self):
         #   { key:   (segment_file_name, offset, value_size) }
@@ -21,6 +22,7 @@ class MementoDb:
         if log_files:
             return log_files[-1]
         return "file-1.log"
+
 
     def _rotate_segment_file(self):
         file_size = 0
@@ -43,7 +45,7 @@ class MementoDb:
                 offset = 0
                 while True:
                     # read the header (first 16 bytes from the current pos, TIMESTAMP (8 bytes) | KEY_SIZE (4 bytes) | VALUE_SIZE (4 bytes))
-                    header = log_file.read(16)
+                    header = log_file.read(self.HEADER_SIZE)
 
                     if not header:
                         break
@@ -61,7 +63,7 @@ class MementoDb:
                         self.dictionary[key] = (log_file_path, offset, value_size)
 
                         # update the offset for next fetch
-                        offset += 16 + key_size + value_size
+                        offset += self.HEADER_SIZE + key_size + value_size
 
 
     def put(self, key, value):
@@ -95,7 +97,7 @@ class MementoDb:
         # open the file
         with open(segment_log_file, "rb") as log_file:
             # the reading starts at OFFSET (in bytes) + HEADERS BYTES + KEY BYTES, what remains are the VALUE BYTES
-            reading_offset = offset + 16 + len(key)
+            reading_offset = offset + self.HEADER_SIZE + len(key)
             # seek from the reading offset
             log_file.seek(reading_offset)
 
