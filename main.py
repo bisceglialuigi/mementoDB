@@ -52,14 +52,16 @@ class MementoDb:
 
                     # retrieve the key
                     key = log_file.read(key_size).decode()
-                    # retrieve and discard value
-                    log_file.read(value_size)
+                    # retrieve the value
+                    value = log_file.read(value_size)
 
-                    # insert into keydir
-                    self.dictionary[key] = (log_file_path, offset, value_size)
+                    # do not restore keys marked with tombstone marker
+                    if value != self.TOMBSTONE:
+                        # insert into keydir
+                        self.dictionary[key] = (log_file_path, offset, value_size)
 
-                    # update the offset for next fetch
-                    offset += 16 + key_size + value_size
+                        # update the offset for next fetch
+                        offset += 16 + key_size + value_size
 
 
     def put(self, key, value):
