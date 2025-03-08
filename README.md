@@ -1,6 +1,6 @@
 # MementoDB
 
-MementoDB is a **toy project** designed for learning about database internals. It is inspired by the **Bitcask** key-value store and implements a simple **append-only** log-based storage engine.
+MementoDB is a **toy project** designed for learning about database internals. It is inspired by the **Bitcask** key-value store and implements a simple **append-only** log-based storage engine. The name **Memento** comes from Latin, meaning **"to remember"**. This fits well for a **database**, as it is designed to **store and recall data efficiently**.
 
 ## Features
 - **Append-Only Storage:** New writes are appended to a log file (`file.log`).
