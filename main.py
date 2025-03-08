@@ -5,8 +5,11 @@ import glob
 
 class MementoDb:
     MAX_FILE_SIZE = 2 * 1024    # 2 KB
-    TOMBSTONE = "__tombstone__"
     HEADER_SIZE = 16
+    FIRST_FILE_NAME = "file-1.log"
+    FILE_NAME_PATTERN = "file-*.log"
+    TOMBSTONE = "__tombstone__"
+
 
     def __init__(self):
         #   { key:   (segment_file_name, offset, value_size) }
@@ -18,10 +21,10 @@ class MementoDb:
 
 
     def _get_latest_log_file(self):
-        log_files = sorted(glob.glob("file-*.log"))
+        log_files = sorted(glob.glob(self.FILE_NAME_PATTERN))
         if log_files:
             return log_files[-1]
-        return "file-1.log"
+        return self.FIRST_FILE_NAME
 
 
     def _rotate_segment_file(self):
@@ -38,7 +41,7 @@ class MementoDb:
         if not os.path.exists(self.current_file_path):
             return
 
-        log_files = sorted(glob.glob("file-*.log"))
+        log_files = sorted(glob.glob(self.FILE_NAME_PATTERN))
 
         for log_file_path in log_files:
             with open(log_file_path, "rb") as log_file:
