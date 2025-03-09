@@ -7,7 +7,6 @@ import hashlib
 
 class MementoDb:
     MAX_FILE_SIZE = 2 * 1024    # 2 KB
-    HEADER_SIZE = 8 + 4 + 4
     CHECKSUM_SIZE = 32
     FIRST_FILE_NAME = "file-1.log"
     FILE_NAME_PATTERN = "file-*.log"
@@ -56,27 +55,27 @@ class MementoDb:
                 offset = 0
                 while True:
                     # read the header (first 16 bytes from the current pos, TIMESTAMP (8 bytes) | KEY_SIZE (4 bytes) | VALUE_SIZE (4 bytes))
-                    header = log_file.read(self.HEADER_SIZE)
+                    header_bytes = log_file.read(Header.SIZE)
 
-                    if not header:
+                    if not header_bytes:
                         break
 
-                    timestamp, key_size, value_size = struct.unpack("QII", header)
+                    header = Header(header_bytes)
 
                     # retrieve the key
-                    offset += self.HEADER_SIZE
+                    offset += Header.SIZE
                     log_file.seek(offset)
-                    key_bytes = log_file.read(key_size)
+                    key_bytes = log_file.read(header.get_key_size())
                     key = key_bytes.decode()
 
                     # retrieve the value
-                    offset += key_size
+                    offset += header.get_key_size()
                     log_file.seek(offset)
-                    value_bytes = log_file.read(value_size)
+                    value_bytes = log_file.read(header.get_value_size())
                     value = value_bytes.decode()
 
                     # retrieve the checksum
-                    offset += value_size
+                    offset += header.get_value_size()
                     log_file.seek(offset)
                     fetched_checksum = log_file.read(self.CHECKSUM_SIZE)
 
@@ -92,7 +91,7 @@ class MementoDb:
                     # do not restore keys marked with tombstone marker
                     if value != self.TOMBSTONE:
                         # insert into keydir
-                        self.dictionary[key] = (log_file_path, offset, value_size)
+                        self.dictionary[key] = (log_file_path, offset, header.get_value_size())
 
 
     def put(self, key, value):
@@ -128,7 +127,7 @@ class MementoDb:
         # open the file
         with open(segment_log_file, "rb") as log_file:
             # the reading starts at OFFSET (in bytes) + HEADERS BYTES + KEY BYTES, what remains are the VALUE BYTES
-            reading_offset = offset + self.HEADER_SIZE
+            reading_offset = offset + Header.SIZE
             log_file.seek(reading_offset)
             # right after the header, it is stored the key
             key_bytes = log_file.read(len(key))
@@ -152,3 +151,26 @@ class MementoDb:
         if key in self.dictionary:
             self.put(key, self.TOMBSTONE)
             del self.dictionary[key]
+
+
+
+class Header:
+    TIMESTAMP_SIZE = 8
+    KEY_SIZE = 4
+    VALUE_SIZE = 4
+    SIZE = TIMESTAMP_SIZE + KEY_SIZE + VALUE_SIZE
+
+    def __init__(self, header_bytes):
+        if len(header_bytes) != self.SIZE:
+            raise ValueError(f"Invalid header size. Expected {self.SIZE} bytes, got {len(header_bytes)}")
+
+        self.timestamp, self.key_size, self.value_size = struct.unpack("QII", header_bytes)
+
+    def get_timestamp(self):
+        return self.timestamp
+
+    def get_key_size(self):
+        return self.key_size
+
+    def get_value_size(self):
+        return self.value_size
