@@ -2,10 +2,13 @@ import time
 import struct
 import os
 import glob
+import hashlib
+
 
 class MementoDb:
     MAX_FILE_SIZE = 2 * 1024    # 2 KB
-    HEADER_SIZE = 16
+    HEADER_SIZE = 8 + 4 + 4
+    CHECKSUM_SIZE = 32
     FIRST_FILE_NAME = "file-1.log"
     FILE_NAME_PATTERN = "file-*.log"
     TOMBSTONE = "__tombstone__"
@@ -37,6 +40,11 @@ class MementoDb:
             self.current_file_path = f"file-{file_number + 1}.log"
 
 
+    def _calculate_checksum(self, key_bytes, value_bytes):
+        data = key_bytes + value_bytes
+        return hashlib.sha256(data).digest()
+
+
     def _load_index(self):
         if not os.path.exists(self.current_file_path):
             return
@@ -56,17 +64,35 @@ class MementoDb:
                     timestamp, key_size, value_size = struct.unpack("QII", header)
 
                     # retrieve the key
-                    key = log_file.read(key_size).decode()
+                    offset += self.HEADER_SIZE
+                    log_file.seek(offset)
+                    key_bytes = log_file.read(key_size)
+                    key = key_bytes.decode()
+
                     # retrieve the value
-                    value = log_file.read(value_size)
+                    offset += key_size
+                    log_file.seek(offset)
+                    value_bytes = log_file.read(value_size)
+                    value = value_bytes.decode()
+
+                    # retrieve the checksum
+                    offset += value_size
+                    log_file.seek(offset)
+                    fetched_checksum = log_file.read(self.CHECKSUM_SIZE)
+
+                    checksum = self._calculate_checksum(key_bytes, value_bytes)
+
+                    offset += self.CHECKSUM_SIZE
+                    log_file.seek(offset)
+
+                    if fetched_checksum != checksum:
+                        print(f"Key {key} has corrupted data, not restoring it.")
+                        continue
 
                     # do not restore keys marked with tombstone marker
                     if value != self.TOMBSTONE:
                         # insert into keydir
                         self.dictionary[key] = (log_file_path, offset, value_size)
-
-                        # update the offset for next fetch
-                        offset += self.HEADER_SIZE + key_size + value_size
 
 
     def put(self, key, value):
@@ -84,8 +110,10 @@ class MementoDb:
             # get offset from file
             offset = log_file.tell()
 
-            # store in append in log_file: HEADER | KEY | VALUE
-            log_file.write(header + key_bytes + value_bytes)
+            checksum = self._calculate_checksum(key_bytes, value_bytes)
+
+            # store in append in log_file: HEADER | KEY | VALUE | CHECKSUM
+            log_file.write(header + key_bytes + value_bytes + checksum)
 
         # update key dictionary with
         self.dictionary[key] = (self.current_file_path, offset, len(value_bytes))
@@ -100,13 +128,24 @@ class MementoDb:
         # open the file
         with open(segment_log_file, "rb") as log_file:
             # the reading starts at OFFSET (in bytes) + HEADERS BYTES + KEY BYTES, what remains are the VALUE BYTES
-            reading_offset = offset + self.HEADER_SIZE + len(key)
-            # seek from the reading offset
+            reading_offset = offset + self.HEADER_SIZE
             log_file.seek(reading_offset)
+            # right after the header, it is stored the key
+            key_bytes = log_file.read(len(key))
 
-            # fetch, after the offset, the VALUE BYTES
-            value = log_file.read(value_size).decode()
+            reading_offset += len(key)
+            log_file.seek(reading_offset)
+            value_bytes = log_file.read(value_size)
 
+            reading_offset += len(value_bytes.decode())
+            log_file.seek(reading_offset)
+            fetched_checksum = log_file.read(self.CHECKSUM_SIZE)
+
+            checksum = self._calculate_checksum(key_bytes, value_bytes)
+            if fetched_checksum != checksum:
+                raise ValueError(f"Data corrupted for key {key}")
+
+        value = value_bytes.decode()
         return value
 
     def delete(self, key):
