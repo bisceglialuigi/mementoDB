@@ -19,7 +19,7 @@ class MementoDb:
         self.dictionary = {}
         self.current_file_path = self._get_latest_log_file()
         #   reconstruct keydir from existing file
-        self._load_index()
+        self._reload_index_from_disk()
         print(self.dictionary)
 
 
@@ -45,7 +45,7 @@ class MementoDb:
         return hashlib.sha256(data).digest()
 
 
-    def _load_index(self):
+    def _reload_index_from_disk(self):
         if not os.path.exists(self.current_file_path):
             return
 
