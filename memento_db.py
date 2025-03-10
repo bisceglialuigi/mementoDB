@@ -5,9 +5,11 @@ import glob
 import hashlib
 
 
+CHECKSUM_SIZE = 32
+
+
 class MementoDb:
     MAX_FILE_SIZE = 2 * 1024    # 2 KB
-    CHECKSUM_SIZE = 32
     FIRST_FILE_NAME = "file-1.log"
     FILE_NAME_PATTERN = "file-*.log"
     TOMBSTONE = "__tombstone__"
@@ -39,11 +41,6 @@ class MementoDb:
             self.current_file_path = f"file-{file_number + 1}.log"
 
 
-    def _calculate_checksum(self, key_bytes, value_bytes):
-        data = key_bytes + value_bytes
-        return hashlib.sha256(data).digest()
-
-
     def _reload_index_from_disk(self):
         if not os.path.exists(self.current_file_path):
             return
@@ -54,7 +51,7 @@ class MementoDb:
             with open(log_file_path, "rb") as log_file:
                 offset = 0
                 while True:
-                    # read the header (first 16 bytes from the current pos, TIMESTAMP (8 bytes) | KEY_SIZE (4 bytes) | VALUE_SIZE (4 bytes))
+                    # read the header
                     header_bytes = log_file.read(Header.SIZE)
 
                     if not header_bytes:
@@ -62,60 +59,46 @@ class MementoDb:
 
                     header = Header(header_bytes)
 
-                    # retrieve the key
+                    # right after the header, it is stored the payload
                     offset += Header.SIZE
                     log_file.seek(offset)
-                    key_bytes = log_file.read(header.get_key_size())
-                    key = key_bytes.decode()
+                    payload_bytes = log_file.read(header.get_key_size() + header.get_value_size() + CHECKSUM_SIZE)
+                    payload = Payload.from_bytes(header, payload_bytes)
 
-                    # retrieve the value
-                    offset += header.get_key_size()
-                    log_file.seek(offset)
-                    value_bytes = log_file.read(header.get_value_size())
-                    value = value_bytes.decode()
-
-                    # retrieve the checksum
-                    offset += header.get_value_size()
-                    log_file.seek(offset)
-                    fetched_checksum = log_file.read(self.CHECKSUM_SIZE)
-
-                    checksum = self._calculate_checksum(key_bytes, value_bytes)
-
-                    offset += self.CHECKSUM_SIZE
-                    log_file.seek(offset)
-
-                    if fetched_checksum != checksum:
-                        print(f"Key {key} has corrupted data, not restoring it.")
+                    if not payload.is_data_integrity_ok():
+                        print(f"Key {payload.get_key()} has corrupted data, not restoring it.")
                         continue
 
                     # do not restore keys marked with tombstone marker
-                    if value != self.TOMBSTONE:
+                    if payload.get_value() != self.TOMBSTONE:
                         # insert into keydir
-                        self.dictionary[key] = (log_file_path, offset, header.get_value_size())
+                        self.dictionary[payload.get_key()] = (log_file_path, offset, header.get_value_size())
+
+                    offset += payload.get_size()
+                    log_file.seek(offset)
 
 
     def put(self, key, value):
 
         self._rotate_segment_file()
 
+        payload = Payload(key, value)
+
         # create HEADER to store in log file as TIMESTAMP | KEY_SIZE | VALUE_SIZE
         timestamp = int(time.time())
-        key_bytes = key.encode()
-        value_bytes = value.encode()
-        header = struct.pack("QII", timestamp, len(key_bytes), len(value_bytes))
+
+        header = struct.pack("QII", timestamp, len(payload.get_key_bytes()), len(payload.get_value_bytes()))
 
 
         with open(self.current_file_path, "ab") as log_file:
             # get offset from file
             offset = log_file.tell()
 
-            checksum = self._calculate_checksum(key_bytes, value_bytes)
-
             # store in append in log_file: HEADER | KEY | VALUE | CHECKSUM
-            log_file.write(header + key_bytes + value_bytes + checksum)
+            log_file.write(header + payload.get_key_bytes() + payload.get_value_bytes() + payload.get_checksum())
 
         # update key dictionary with
-        self.dictionary[key] = (self.current_file_path, offset, len(value_bytes))
+        self.dictionary[key] = (self.current_file_path, offset, len(payload.get_value_bytes()))
 
     def get(self, key):
         if key not in self.dictionary:
@@ -127,25 +110,21 @@ class MementoDb:
         # open the file
         with open(segment_log_file, "rb") as log_file:
             # the reading starts at OFFSET (in bytes) + HEADERS BYTES + KEY BYTES, what remains are the VALUE BYTES
-            reading_offset = offset + Header.SIZE
+            reading_offset = offset
             log_file.seek(reading_offset)
-            # right after the header, it is stored the key
-            key_bytes = log_file.read(len(key))
+            header_bytes = log_file.read(Header.SIZE)
+            header = Header(header_bytes)
 
-            reading_offset += len(key)
+            # right after the header, it is stored the payload
+            reading_offset += Header.SIZE
             log_file.seek(reading_offset)
-            value_bytes = log_file.read(value_size)
+            payload_bytes = log_file.read(header.get_key_size() + header.get_value_size() + CHECKSUM_SIZE)
+            payload = Payload.from_bytes(header, payload_bytes)
 
-            reading_offset += len(value_bytes.decode())
-            log_file.seek(reading_offset)
-            fetched_checksum = log_file.read(self.CHECKSUM_SIZE)
-
-            checksum = self._calculate_checksum(key_bytes, value_bytes)
-            if fetched_checksum != checksum:
+            if not payload.is_data_integrity_ok():
                 raise ValueError(f"Data corrupted for key {key}")
 
-        value = value_bytes.decode()
-        return value
+        return payload.get_value()
 
     def delete(self, key):
         if key in self.dictionary:
@@ -174,3 +153,50 @@ class Header:
 
     def get_value_size(self):
         return self.value_size
+
+
+class Payload:
+    def __init__(self, key, value):
+        self.key = key
+        self.key_bytes = self.key.encode()
+        self.value = value
+        self.value_bytes = self.value.encode()
+        self.checksum = self.calculate_checksum()
+        self.size = len(self.key_bytes) + len(self.value_bytes) + CHECKSUM_SIZE
+
+    @classmethod
+    def from_bytes(cls, header, payload_bytes):
+        key_bytes = payload_bytes[:header.get_key_size()]
+        key = key_bytes.decode()
+        value_bytes = payload_bytes[header.get_key_size():header.get_key_size() + header.get_value_size()]
+        value = value_bytes.decode()
+        checksum = payload_bytes[header.get_key_size() + header.get_value_size():]
+
+        instance = cls(key, value)
+        instance.checksum = checksum  # Overwrite calculated checksum with stored one
+        return instance
+
+    def get_key(self):
+        return self.key
+
+    def get_key_bytes(self):
+        return self.key_bytes
+
+    def get_value(self):
+        return self.value
+
+    def get_value_bytes(self):
+        return self.value_bytes
+
+    def get_size(self):
+        return self.size
+
+    def get_checksum(self):
+        return self.checksum
+
+    def calculate_checksum(self):
+        data = self.key_bytes + self.value_bytes
+        return hashlib.sha256(data).digest()
+
+    def is_data_integrity_ok(self):
+        return self.checksum == self.calculate_checksum()
